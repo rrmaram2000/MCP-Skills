@@ -6,10 +6,13 @@ for extracurricular activities at Mergington High School.
 """
 
 from fastapi import FastAPI, HTTPException
+from fastapi import Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
 from pathlib import Path
+import json
+from typing import Dict, Any
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -19,63 +22,37 @@ current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
 
-# In-memory activity database
-activities = {
-    "Chess Club": {
-        "description": "Learn strategies and compete in chess tournaments",
-        "schedule": "Fridays, 3:30 PM - 5:00 PM",
-        "max_participants": 12,
-        "participants": ["michael@mergington.edu", "daniel@mergington.edu"]
-    },
-    "Programming Class": {
-        "description": "Learn programming fundamentals and build software projects",
-        "schedule": "Tuesdays and Thursdays, 3:30 PM - 4:30 PM",
-        "max_participants": 20,
-        "participants": ["emma@mergington.edu", "sophia@mergington.edu"]
-    },
-    "Gym Class": {
-        "description": "Physical education and sports activities",
-        "schedule": "Mondays, Wednesdays, Fridays, 2:00 PM - 3:00 PM",
-        "max_participants": 30,
-        "participants": ["john@mergington.edu", "olivia@mergington.edu"]
-    },
-    "Soccer Team": {
-        "description": "Join the school soccer team and compete in matches",
-        "schedule": "Tuesdays and Thursdays, 4:00 PM - 5:30 PM",
-        "max_participants": 22,
-        "participants": ["liam@mergington.edu", "noah@mergington.edu"]
-    },
-    "Basketball Team": {
-        "description": "Practice and play basketball with the school team",
-        "schedule": "Wednesdays and Fridays, 3:30 PM - 5:00 PM",
-        "max_participants": 15,
-        "participants": ["ava@mergington.edu", "mia@mergington.edu"]
-    },
-    "Art Club": {
-        "description": "Explore your creativity through painting and drawing",
-        "schedule": "Thursdays, 3:30 PM - 5:00 PM",
-        "max_participants": 15,
-        "participants": ["amelia@mergington.edu", "harper@mergington.edu"]
-    },
-    "Drama Club": {
-        "description": "Act, direct, and produce plays and performances",
-        "schedule": "Mondays and Wednesdays, 4:00 PM - 5:30 PM",
-        "max_participants": 20,
-        "participants": ["ella@mergington.edu", "scarlett@mergington.edu"]
-    },
-    "Math Club": {
-        "description": "Solve challenging problems and participate in math competitions",
-        "schedule": "Tuesdays, 3:30 PM - 4:30 PM",
-        "max_participants": 10,
-        "participants": ["james@mergington.edu", "benjamin@mergington.edu"]
-    },
-    "Debate Team": {
-        "description": "Develop public speaking and argumentation skills",
-        "schedule": "Fridays, 4:00 PM - 5:30 PM",
-        "max_participants": 12,
-        "participants": ["charlotte@mergington.edu", "henry@mergington.edu"]
-    }
-}
+DATA_DIR = current_dir / "data"
+DATA_FILE = DATA_DIR / "activities.json"
+
+
+def _ensure_data_file():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not DATA_FILE.exists():
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+
+
+def _load_activities() -> Dict[str, Dict[str, Any]]:
+    _ensure_data_file()
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    # Ensure default structure for legacy entries
+    for name, details in data.items():
+        details.setdefault("participants", [])
+        details.setdefault("max_participants", 0)
+        details.setdefault("draft", False)
+    return data
+
+
+def _save_activities(activities: Dict[str, Dict[str, Any]]):
+    _ensure_data_file()
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(activities, f, indent=2)
+
+
+# Load activities from disk on startup
+activities = _load_activities()
 
 
 @app.get("/")
@@ -84,8 +61,78 @@ def root():
 
 
 @app.get("/activities")
-def get_activities():
+def get_activities(published_only: bool = True):
+    if not published_only:
+        return activities
+    # Return only non-draft (published) activities
+    return {name: details for name, details in activities.items() if not details.get("draft", False)}
+
+
+@app.get("/activities/all")
+def get_all_activities():
+    # Admin/host view: include drafts
     return activities
+
+
+@app.post("/activities")
+def create_activity(payload: Dict[str, Any] = Body(...)):
+    name = payload.get("name")
+    if not name:
+        raise HTTPException(status_code=400, detail="Missing 'name' field")
+    if name in activities:
+        raise HTTPException(status_code=400, detail="Activity already exists")
+
+    activities[name] = {
+        "description": payload.get("description", ""),
+        "schedule": payload.get("schedule", ""),
+        "max_participants": int(payload.get("max_participants", 0)),
+        "participants": payload.get("participants", []),
+        "poster": payload.get("poster"),
+        "draft": bool(payload.get("draft", True)),
+    }
+    _save_activities(activities)
+    return {"message": f"Created activity '{name}'", "activity": activities[name]}
+
+
+@app.put("/activities/{activity_name}")
+def update_activity(activity_name: str, payload: Dict[str, Any] = Body(...)):
+    if activity_name not in activities:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    activity = activities[activity_name]
+    for key in ["description", "schedule", "max_participants", "poster"]:
+        if key in payload:
+            activity[key] = payload[key] if key != "max_participants" else int(payload[key])
+    if "draft" in payload:
+        activity["draft"] = bool(payload["draft"])
+    _save_activities(activities)
+    return {"message": f"Updated activity '{activity_name}'", "activity": activity}
+
+
+@app.delete("/activities/{activity_name}")
+def delete_activity(activity_name: str):
+    if activity_name not in activities:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    removed = activities.pop(activity_name)
+    _save_activities(activities)
+    return {"message": f"Deleted activity '{activity_name}'", "activity": removed}
+
+
+@app.post("/activities/{activity_name}/publish")
+def publish_activity(activity_name: str):
+    if activity_name not in activities:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    activities[activity_name]["draft"] = False
+    _save_activities(activities)
+    return {"message": f"Published activity '{activity_name}'"}
+
+
+@app.post("/activities/{activity_name}/unpublish")
+def unpublish_activity(activity_name: str):
+    if activity_name not in activities:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    activities[activity_name]["draft"] = True
+    _save_activities(activities)
+    return {"message": f"Unpublished activity '{activity_name}'"}
 
 
 @app.post("/activities/{activity_name}/signup")
@@ -107,6 +154,7 @@ def signup_for_activity(activity_name: str, email: str):
 
     # Add student
     activity["participants"].append(email)
+    _save_activities(activities)
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
@@ -129,4 +177,5 @@ def unregister_from_activity(activity_name: str, email: str):
 
     # Remove student
     activity["participants"].remove(email)
+    _save_activities(activities)
     return {"message": f"Unregistered {email} from {activity_name}"}
